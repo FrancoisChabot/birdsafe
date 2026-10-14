@@ -1,0 +1,29 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/birdsafeTargets.cmake")
+
+# Convenient aliases matching in-tree alias targets
+if(NOT TARGET birdsafe::core AND TARGET birdsafe::bs_core)
+    add_library(birdsafe::core ALIAS birdsafe::bs_core)
+endif()
+if(NOT TARGET birdsafe::num AND TARGET birdsafe::bs_num)
+    add_library(birdsafe::num ALIAS birdsafe::bs_num)
+endif()
+if(NOT TARGET birdsafe::sets AND TARGET birdsafe::bs_sets)
+    add_library(birdsafe::sets ALIAS birdsafe::bs_sets)
+endif()
+
+if(NOT TARGET bs_core::bs_core AND TARGET birdsafe::bs_core)
+    add_library(bs_core::bs_core ALIAS birdsafe::bs_core)
+endif()
+if(NOT TARGET bs_num::bs_num AND TARGET birdsafe::bs_num)
+    add_library(bs_num::bs_num ALIAS birdsafe::bs_num)
+endif()
+if(NOT TARGET bs_sets::bs_sets AND TARGET birdsafe::bs_sets)
+    add_library(bs_sets::bs_sets ALIAS birdsafe::bs_sets)
+endif()
+
+check_required_components(birdsafe)

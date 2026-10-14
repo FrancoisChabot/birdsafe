@@ -1,0 +1,3 @@
+add_executable(test_birdsafe_integration test_birdsafe_integration.c)
+target_link_libraries(test_birdsafe_integration PRIVATE bs_sets bs_num bs_core)
+add_test(NAME test_birdsafe_integration COMMAND test_birdsafe_integration)
