@@ -6,6 +6,9 @@
  * small integers (fixnums) and ref-counted heap-allocated multi-precision
  * integers (bignums).
  *
+ * The current representation requires a 64-bit pointer-sized word. Other
+ * architectures may be supported if needed by adapting the fixnum width.
+ *
  * Tagging Scheme:
  * - Bit 0 == 1: Fixnum (immediate 63-bit signed integer, extracted via arithmetic shift).
  * - Bit 0 == 0: Heap bignum pointer (or 0 for NULL / uninitialized).

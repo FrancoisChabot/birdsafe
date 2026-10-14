@@ -1,6 +1,6 @@
 # BirdSafe (`bs_`)
 
-BirdSafe is a modular, high-performance pure C11 foundational runtime and substrate for Chirp and language runtime environments.
+BirdSafe is a modular, high-performance C11 foundational runtime and substrate for Chirp and language runtime environments. The current implementation targets 64-bit architectures. Other architectures can be supported if a need arises.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ The BirdSafe monorepo organizes foundational services in the `libs/` directory:
   - Unified status codes (`bs_status`) and three-valued logic (`bs_truth`).
   - Architecture assertions and symbol visibility macros (`BS_API` in `bs_config.h`).
 - **`libs/num` (`bs_num`)**: Numerics runtime:
-  - Arbitrary-precision integer engine with 63-bit immediate fixnums and reference-counted bignums (`bs_int`).
+  - Arbitrary-precision integer engine with 63-bit immediate fixnums and reference-counted bignums (`bs_int`); the fixnum representation currently requires a 64-bit pointer-sized word.
   - High-performance arithmetic, bitwise operations, shifts, and base conversions.
 - **`libs/sets` (`bs_sets`)**: Set theory, natures, and universes:
   - Core universe, nature, value handles (`bs_value`), and set stores (`bs_set_store`).
