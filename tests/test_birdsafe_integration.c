@@ -1,6 +1,10 @@
 #include "bs_core.h"
 #include "bs_num.h"
 #include "bs_sets.h"
+
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

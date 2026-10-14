@@ -9,6 +9,7 @@ add_library(bs_core
 )
 add_library(bs_core::bs_core ALIAS bs_core)
 add_library(birdsafe::core ALIAS bs_core)
+add_library(birdsafe::bs_core ALIAS bs_core)
 
 target_include_directories(bs_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

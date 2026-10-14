@@ -852,7 +852,7 @@ void bs_universe_destroy(bs_universe *universe)
         bs_free(nature);
         nature = next;
     }
-    bs_payload_object *object = (bs_payload_object *)bs_atomic_load_relaxed(&universe->payload_objects);
+    bs_payload_object *object = (bs_payload_object *)bs_atomic_load_acquire(&universe->payload_objects);
     while (object != NULL) {
         bs_payload_object *next = object->next;
         if (object->destroy != NULL) {

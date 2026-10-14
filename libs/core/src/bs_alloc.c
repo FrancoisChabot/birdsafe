@@ -4,12 +4,11 @@
 #include <string.h>
 
 #ifndef NDEBUG
-#include <stdatomic.h>
-static atomic_bool allocator_frozen = ATOMIC_VAR_INIT(false);
+static bs_atomic_uint32_t allocator_frozen = 0;
 
 static inline void freeze_allocator(void) {
-    if (!atomic_load_explicit(&allocator_frozen, memory_order_relaxed)) {
-        atomic_store_explicit(&allocator_frozen, true, memory_order_relaxed);
+    if (!bs_atomic_load_relaxed(&allocator_frozen)) {
+        bs_atomic_store_relaxed(&allocator_frozen, 1);
     }
 }
 #else
@@ -47,9 +46,9 @@ bool bs_set_allocator(bs_allocator_t a) {
     if (!a.alloc || !a.realloc || !a.free)
         return false;
 #ifndef NDEBUG
-    assert(!atomic_load_explicit(&allocator_frozen, memory_order_relaxed) &&
+    assert(!bs_atomic_load_relaxed(&allocator_frozen) &&
            "bs_set_allocator: cannot change allocator after allocations have begun or allocator already set");
-    atomic_store_explicit(&allocator_frozen, true, memory_order_relaxed);
+    bs_atomic_store_relaxed(&allocator_frozen, 1);
 #endif
     active_allocator = a;
     return true;

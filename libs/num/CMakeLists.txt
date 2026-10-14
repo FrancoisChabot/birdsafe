@@ -9,6 +9,7 @@ add_library(bs_num
 )
 add_library(bs_num::bs_num ALIAS bs_num)
 add_library(birdsafe::num ALIAS bs_num)
+add_library(birdsafe::bs_num ALIAS bs_num)
 
 target_include_directories(bs_num PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

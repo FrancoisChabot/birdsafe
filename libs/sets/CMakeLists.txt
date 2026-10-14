@@ -8,6 +8,7 @@ add_library(bs_sets
 )
 add_library(bs_sets::bs_sets ALIAS bs_sets)
 add_library(birdsafe::sets ALIAS bs_sets)
+add_library(birdsafe::bs_sets ALIAS bs_sets)
 
 target_include_directories(bs_sets PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

@@ -6,6 +6,10 @@
  */
 
 #include "bs_sets/bs_sets.h"
+
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <pthread.h>
 #include <stdbool.h>

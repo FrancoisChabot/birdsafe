@@ -1,4 +1,8 @@
 #include "bs_core.h"
+
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
