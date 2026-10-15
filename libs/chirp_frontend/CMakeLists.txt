@@ -9,6 +9,7 @@ add_library(chirp_frontend
     src/chirp_ast_arena.c
     src/chirp_ast.c
     src/chirp_ast_printer.c
+    src/chirp_parser.c
 )
 add_library(chirp_frontend::chirp_frontend ALIAS chirp_frontend)
 add_library(birdsafe::chirp_frontend ALIAS chirp_frontend)
@@ -29,6 +30,10 @@ if(BIRDSAFE_BUILD_TESTS)
     add_executable(test_chirp_ast tests/test_chirp_ast.c)
     target_link_libraries(test_chirp_ast PRIVATE chirp_frontend)
     add_test(NAME test_chirp_ast COMMAND test_chirp_ast)
+
+    add_executable(test_chirp_parser tests/test_chirp_parser.c)
+    target_link_libraries(test_chirp_parser PRIVATE chirp_frontend)
+    add_test(NAME test_chirp_parser COMMAND test_chirp_parser)
 endif()
 
 install(TARGETS chirp_frontend
