@@ -37,6 +37,22 @@ const char *bs_status_string(bs_status status) {
                 case 4: return "Callback error";
                 default: return "Unknown sets status";
             }
+        case BS_DOMAIN_VM:
+            switch (code) {
+                case 1: return "Undefined symbol";
+                case 2: return "Immutable binding";
+                case 3: return "Shadow forbidden";
+                case 4: return "Redefinition";
+                case 5: return "Constraint violation";
+                case 6: return "Frame stack overflow";
+                case 7: return "Frame stack underflow";
+                case 8: return "Unhandled signal";
+                case 9: return "Module not found";
+                case 10: return "Arity mismatch";
+                case 11: return "Type error";
+                case 12: return "Invalid block";
+                default: return "Unknown vm status";
+            }
         default:
             return "Unknown status";
     }

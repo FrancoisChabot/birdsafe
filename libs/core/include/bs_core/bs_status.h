@@ -35,6 +35,22 @@ typedef enum bs_core_status {
     BS_OUT_OF_MEMORY    = BS_STATUS_MAKE(BS_DOMAIN_CORE, 2),
 } bs_core_status;
 
+/** VM domain status and error codes. */
+typedef enum bs_vm_status {
+    BS_VM_UNDEFINED_SYMBOL      = BS_STATUS_MAKE(BS_DOMAIN_VM, 1),
+    BS_VM_IMMUTABLE_BINDING     = BS_STATUS_MAKE(BS_DOMAIN_VM, 2),
+    BS_VM_SHADOW_FORBIDDEN      = BS_STATUS_MAKE(BS_DOMAIN_VM, 3),
+    BS_VM_REDEFINITION          = BS_STATUS_MAKE(BS_DOMAIN_VM, 4),
+    BS_VM_CONSTRAINT_VIOLATION  = BS_STATUS_MAKE(BS_DOMAIN_VM, 5),
+    BS_VM_FRAME_STACK_OVERFLOW  = BS_STATUS_MAKE(BS_DOMAIN_VM, 6),
+    BS_VM_FRAME_STACK_UNDERFLOW = BS_STATUS_MAKE(BS_DOMAIN_VM, 7),
+    BS_VM_UNHANDLED_SIGNAL      = BS_STATUS_MAKE(BS_DOMAIN_VM, 8),
+    BS_VM_MODULE_NOT_FOUND      = BS_STATUS_MAKE(BS_DOMAIN_VM, 9),
+    BS_VM_ARITY_MISMATCH        = BS_STATUS_MAKE(BS_DOMAIN_VM, 10),
+    BS_VM_TYPE_ERROR            = BS_STATUS_MAKE(BS_DOMAIN_VM, 11),
+    BS_VM_INVALID_BLOCK         = BS_STATUS_MAKE(BS_DOMAIN_VM, 12),
+} bs_vm_status;
+
 /** Returns the canonical name of the status code's domain. */
 BS_API const char *bs_status_domain_name(bs_status status);
 

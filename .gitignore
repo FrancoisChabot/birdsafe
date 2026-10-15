@@ -47,6 +47,10 @@ vgcore.*
 *~
 *.user
 
+# Misc
+
+for_reference/
+
 # Operating System files
 .DS_Store
 Thumbs.db
