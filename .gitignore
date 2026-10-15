@@ -30,13 +30,6 @@ CTestTestfile.cmake
 *.app
 *.d
 
-# Debug symbols and crash artifacts
-*.dSYM/
-*.suo
-*.pdb
-core
-core.*
-vgcore.*
 
 # IDEs and Editors
 .vscode/
