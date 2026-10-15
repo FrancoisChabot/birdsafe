@@ -41,6 +41,35 @@ static void test_ast_arena_lifecycle(void) {
     chirp_ast_arena_destroy(&arena);
 }
 
+static void test_ast_arena_alignment_and_overflow(void) {
+    chirp_ast_arena arena;
+    chirp_ast_arena_init(&arena, 256);
+
+    // Non-power-of-two alignment (e.g. 3, 5, 7)
+    for (size_t align = 1; align <= 16; ++align) {
+        for (size_t i = 0; i < 5; ++i) {
+            void *p = chirp_ast_arena_alloc(&arena, 13 + i, align);
+            assert(p != NULL);
+            assert(((uintptr_t)p % align) == 0);
+        }
+    }
+
+    // Size zero returns NULL
+    assert(chirp_ast_arena_alloc(&arena, 0, 8) == NULL);
+    assert(chirp_ast_arena_alloc_array(&arena, 0, 4) == NULL);
+    assert(chirp_ast_arena_alloc_array(&arena, 10, 0) == NULL);
+
+    // Multiplication overflow in alloc_array
+    assert(chirp_ast_arena_alloc_array(&arena, SIZE_MAX, 2) == NULL);
+    assert(chirp_ast_arena_alloc_array(&arena, (SIZE_MAX / 4) + 1, 8) == NULL);
+
+    // Huge allocations that would overflow size_t additions
+    assert(chirp_ast_arena_alloc(&arena, SIZE_MAX - 1, 8) == NULL);
+    assert(chirp_ast_arena_alloc(&arena, SIZE_MAX - 16, 32) == NULL);
+
+    chirp_ast_arena_destroy(&arena);
+}
+
 static void test_binary_and_unary_ast(void) {
     chirp_ast_arena arena;
     chirp_ast_arena_init(&arena, 0);
@@ -169,6 +198,7 @@ int main(void) {
     printf("Running chirp_ast tests...\n");
 
     test_ast_arena_lifecycle();
+    test_ast_arena_alignment_and_overflow();
     test_binary_and_unary_ast();
     test_statements_ast();
     test_control_flow_and_data_ast();

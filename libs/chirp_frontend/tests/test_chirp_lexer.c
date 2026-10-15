@@ -374,6 +374,9 @@ static void test_format_text(void) {
     assert(chirp_format_text(source2, strlen(source2), &formatted, &len) == BS_OK);
     assert(strcmp(formatted, source2) == 0);
     bs_free(formatted);
+
+    // Overflow protection on length
+    assert(chirp_format_text(source, SIZE_MAX - 10, &formatted, &len) == BS_OUT_OF_MEMORY);
 }
 
 int main(void) {

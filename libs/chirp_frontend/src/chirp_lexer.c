@@ -89,6 +89,10 @@ static bool match_word(chirp_lexer *lexer, const char *word, size_t word_len) {
 
 static bool push_template_brace(chirp_lexer *lexer, uint32_t val) {
     if (lexer->template_brace_top >= lexer->template_brace_cap) {
+        if (lexer->template_brace_cap > (SIZE_MAX / sizeof(uint32_t)) / 2) {
+            lexer->error_status = BS_OUT_OF_MEMORY;
+            return false;
+        }
         size_t new_cap = lexer->template_brace_cap * 2;
         uint32_t *new_stack = (uint32_t *)bs_alloc(new_cap * sizeof(uint32_t));
         if (new_stack == NULL) {
@@ -628,8 +632,30 @@ bs_status chirp_tokenize_cstr(const char *source, chirp_token_list *out_tokens) 
     return chirp_tokenize(source, len, out_tokens);
 }
 
+static bool ensure_buf_capacity(char **p_buf, size_t *p_cap, size_t needed) {
+    if (needed <= *p_cap) return true;
+    size_t new_cap = *p_cap > 0 ? *p_cap : 64;
+    while (new_cap < needed) {
+        if (new_cap > SIZE_MAX / 2) {
+            new_cap = needed;
+            break;
+        }
+        new_cap *= 2;
+    }
+    if (new_cap < needed) return false;
+    char *new_buf = (char *)bs_realloc(*p_buf, new_cap);
+    if (new_buf == NULL) return false;
+    *p_buf = new_buf;
+    *p_cap = new_cap;
+    return true;
+}
+
 bs_status chirp_format_text(const char *source, size_t length, char **out_formatted, size_t *out_length) {
     assert(out_formatted != NULL);
+    if (length > SIZE_MAX - 64) {
+        return BS_OUT_OF_MEMORY;
+    }
+
     chirp_token_list tokens;
     bs_status st = chirp_tokenize(source, length, &tokens);
     if (st != BS_OK) {
@@ -649,15 +675,16 @@ bs_status chirp_format_text(const char *source, size_t length, char **out_format
 
         // Append leading trivia
         if (t->leading_trivia.len > 0) {
-            while (len + t->leading_trivia.len + 16 > cap) {
-                cap *= 2;
-                char *new_buf = (char *)bs_realloc(buf, cap);
-                if (new_buf == NULL) {
-                    bs_free(buf);
-                    chirp_token_list_free(&tokens);
-                    return BS_OUT_OF_MEMORY;
-                }
-                buf = new_buf;
+            if (t->leading_trivia.len > SIZE_MAX - len - 1) {
+                bs_free(buf);
+                chirp_token_list_free(&tokens);
+                return BS_OUT_OF_MEMORY;
+            }
+            size_t needed = len + t->leading_trivia.len + 1;
+            if (!ensure_buf_capacity(&buf, &cap, needed)) {
+                bs_free(buf);
+                chirp_token_list_free(&tokens);
+                return BS_OUT_OF_MEMORY;
             }
             memcpy(buf + len, t->leading_trivia.ptr, t->leading_trivia.len);
             len += t->leading_trivia.len;
@@ -687,15 +714,16 @@ bs_status chirp_format_text(const char *source, size_t length, char **out_format
             rep_len = t->lexeme.len;
         }
 
-        while (len + rep_len + 16 > cap) {
-            cap *= 2;
-            char *new_buf = (char *)bs_realloc(buf, cap);
-            if (new_buf == NULL) {
-                bs_free(buf);
-                chirp_token_list_free(&tokens);
-                return BS_OUT_OF_MEMORY;
-            }
-            buf = new_buf;
+        if (rep_len > SIZE_MAX - len - 1) {
+            bs_free(buf);
+            chirp_token_list_free(&tokens);
+            return BS_OUT_OF_MEMORY;
+        }
+        size_t needed = len + rep_len + 1;
+        if (!ensure_buf_capacity(&buf, &cap, needed)) {
+            bs_free(buf);
+            chirp_token_list_free(&tokens);
+            return BS_OUT_OF_MEMORY;
         }
         memcpy(buf + len, replacement, rep_len);
         len += rep_len;

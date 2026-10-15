@@ -52,6 +52,33 @@ static void parser_fail(chirp_parser *parser, chirp_token token, const char *msg
     }
 }
 
+static const chirp_token *peek(const chirp_parser *p);
+
+static void parser_oom(chirp_parser *parser) {
+    if (!parser->had_error) {
+        parser->had_error = true;
+        parser->error_status = BS_OUT_OF_MEMORY;
+        if (parser->error != NULL) {
+            parser->error->token = *peek(parser);
+            snprintf(parser->error->message, sizeof(parser->error->message), "Out of memory during parsing");
+        }
+    }
+}
+
+static inline chirp_expr *check_expr_alloc(chirp_parser *p, chirp_expr *e) {
+    if (e == NULL && !p->had_error) {
+        parser_oom(p);
+    }
+    return e;
+}
+
+static inline chirp_stmt *check_stmt_alloc(chirp_parser *p, chirp_stmt *s) {
+    if (s == NULL && !p->had_error) {
+        parser_oom(p);
+    }
+    return s;
+}
+
 static const chirp_token *peek(const chirp_parser *p) {
     if (p->current < p->count) {
         return &p->tokens[p->current];
@@ -104,8 +131,25 @@ static const chirp_token *consume(chirp_parser *p, chirp_token_type type, const 
 }
 
 /* ========================================================================= */
-/* Dynamic Pointer Vector Helper (Local to parser module)                    */
+/* Dynamic Buffer & Vector Helpers                                           */
 /* ========================================================================= */
+
+static bool buf_grow(chirp_parser *p, void **buf, size_t *cap, size_t count, size_t elem_size) {
+    if (count < *cap) return true;
+    if (elem_size == 0 || *cap > (SIZE_MAX / elem_size) / 2) {
+        parser_oom(p);
+        return false;
+    }
+    size_t new_cap = *cap == 0 ? 4 : *cap * 2;
+    void *new_buf = bs_realloc(*buf, new_cap * elem_size);
+    if (new_buf == NULL) {
+        parser_oom(p);
+        return false;
+    }
+    *buf = new_buf;
+    *cap = new_cap;
+    return true;
+}
 
 typedef struct ptr_vec {
     void **items;
@@ -119,11 +163,16 @@ static void ptr_vec_init(ptr_vec *v) {
     v->cap = 0;
 }
 
-static bool ptr_vec_push(ptr_vec *v, void *item) {
+static bool ptr_vec_push(chirp_parser *p, ptr_vec *v, void *item) {
     if (v->count >= v->cap) {
+        if (v->cap > (SIZE_MAX / sizeof(void *)) / 2) {
+            parser_oom(p);
+            return false;
+        }
         size_t new_cap = v->cap == 0 ? 8 : v->cap * 2;
         void **new_items = (void **)bs_realloc(v->items, new_cap * sizeof(void *));
         if (new_items == NULL) {
+            parser_oom(p);
             return false;
         }
         v->items = new_items;
@@ -250,14 +299,14 @@ static chirp_named_binding parse_binding(
         is_function = true;
 
         if (!check(p, CHIRP_TOK_RPAREN)) {
-            size_t cap = 4;
-            chirp_named_binding *param_buf = (chirp_named_binding *)bs_alloc(cap * sizeof(chirp_named_binding));
+            size_t cap = 0;
+            chirp_named_binding *param_buf = NULL;
             size_t count = 0;
 
             do {
-                if (count >= cap) {
-                    cap *= 2;
-                    param_buf = (chirp_named_binding *)bs_realloc(param_buf, cap * sizeof(chirp_named_binding));
+                if (!buf_grow(p, (void **)&param_buf, &cap, count, sizeof(chirp_named_binding))) {
+                    bs_free(param_buf);
+                    return binding;
                 }
                 param_buf[count++] = parse_binding(p, false, false, false, NULL);
                 if (p->had_error) {
@@ -266,10 +315,18 @@ static chirp_named_binding parse_binding(
                 }
             } while (match(p, CHIRP_TOK_COMMA));
 
-            chirp_named_binding *arena_params = (chirp_named_binding *)chirp_ast_arena_alloc_array(
-                p->arena, count, sizeof(chirp_named_binding)
-            );
-            memcpy(arena_params, param_buf, count * sizeof(chirp_named_binding));
+            chirp_named_binding *arena_params = NULL;
+            if (count > 0) {
+                arena_params = (chirp_named_binding *)chirp_ast_arena_alloc_array(
+                    p->arena, count, sizeof(chirp_named_binding)
+                );
+                if (arena_params == NULL) {
+                    bs_free(param_buf);
+                    parser_oom(p);
+                    return binding;
+                }
+                memcpy(arena_params, param_buf, count * sizeof(chirp_named_binding));
+            }
             bs_free(param_buf);
 
             lambda_params.items = arena_params;
@@ -303,7 +360,8 @@ static chirp_named_binding parse_binding(
             parser_fail(p, *peek(p), "Function binding must have a body.");
             return binding;
         }
-        initializer = chirp_ast_new_lambda(p->arena, lambda_params, type_bound, initializer, paren);
+        initializer = check_expr_alloc(p, chirp_ast_new_lambda(p->arena, lambda_params, type_bound, initializer, paren));
+        if (initializer == NULL) return binding;
         type_bound = NULL;
     }
 
@@ -338,7 +396,7 @@ static chirp_stmt *debug_statement(chirp_parser *p) {
 
     while (!check(p, CHIRP_TOK_RBRACE) && !is_at_end(p)) {
         chirp_stmt *s = statement(p);
-        if (p->had_error) {
+        if (p->had_error || s == NULL) {
             ptr_vec_free(&stmts);
             return NULL;
         }
@@ -347,7 +405,10 @@ static chirp_stmt *debug_statement(chirp_parser *p) {
             parser_fail(p, s->diagnostic_token, "Cannot use 'let' inside a 'debug' block.");
             return NULL;
         }
-        ptr_vec_push(&stmts, s);
+        if (!ptr_vec_push(p, &stmts, s)) {
+            ptr_vec_free(&stmts);
+            return NULL;
+        }
     }
     consume(p, CHIRP_TOK_RBRACE, "Expect '}' after debug block.");
     if (p->had_error) {
@@ -355,14 +416,21 @@ static chirp_stmt *debug_statement(chirp_parser *p) {
         return NULL;
     }
 
-    chirp_stmt_list list = { .items = NULL, .count = stmts.count };
+    chirp_stmt **arena_stmts = NULL;
     if (stmts.count > 0) {
-        list.items = (chirp_stmt **)chirp_ast_arena_alloc_array(p->arena, stmts.count, sizeof(chirp_stmt *));
-        memcpy(list.items, stmts.items, stmts.count * sizeof(chirp_stmt *));
+        arena_stmts = (chirp_stmt **)chirp_ast_arena_alloc_array(p->arena, stmts.count, sizeof(chirp_stmt *));
+        if (arena_stmts == NULL) {
+            ptr_vec_free(&stmts);
+            parser_oom(p);
+            return NULL;
+        }
+        memcpy(arena_stmts, stmts.items, stmts.count * sizeof(chirp_stmt *));
     }
+    size_t count = stmts.count;
     ptr_vec_free(&stmts);
 
-    return chirp_ast_new_debug_stmt(p->arena, list, debug_tok);
+    chirp_stmt_list list = { .items = arena_stmts, .count = count };
+    return check_stmt_alloc(p, chirp_ast_new_debug_stmt(p->arena, list, debug_tok));
 }
 
 static chirp_stmt *let_declaration(chirp_parser *p) {
@@ -629,21 +697,21 @@ static chirp_expr *postfix(chirp_parser *p) {
             bool has_named = false;
             bool has_positional = false;
 
-            size_t cap = 4;
-            chirp_ast_arg *arg_buf = (chirp_ast_arg *)bs_alloc(cap * sizeof(chirp_ast_arg));
+            size_t cap = 0;
+            chirp_ast_arg *arg_buf = NULL;
             size_t count = 0;
 
             if (!check(p, CHIRP_TOK_RPAREN)) {
                 do {
-                    if (count >= cap) {
-                        cap *= 2;
-                        arg_buf = (chirp_ast_arg *)bs_realloc(arg_buf, cap * sizeof(chirp_ast_arg));
+                    if (!buf_grow(p, (void **)&arg_buf, &cap, count, sizeof(chirp_ast_arg))) {
+                        bs_free(arg_buf);
+                        return NULL;
                     }
                     if (check(p, CHIRP_TOK_IDENTIFIER) && peek_next(p)->type == CHIRP_TOK_EQUAL) {
                         chirp_token name = *advance(p);
                         advance(p); // consume '='
                         chirp_expr *val = expression(p);
-                        if (p->had_error) { bs_free(arg_buf); return NULL; }
+                        if (p->had_error || val == NULL) { bs_free(arg_buf); return NULL; }
 
                         arg_buf[count].name = name;
                         arg_buf[count].has_name = true;
@@ -652,7 +720,7 @@ static chirp_expr *postfix(chirp_parser *p) {
                         has_named = true;
                     } else {
                         chirp_expr *val = expression(p);
-                        if (p->had_error) { bs_free(arg_buf); return NULL; }
+                        if (p->had_error || val == NULL) { bs_free(arg_buf); return NULL; }
 
                         memset(&arg_buf[count].name, 0, sizeof(chirp_token));
                         arg_buf[count].has_name = false;
@@ -677,26 +745,32 @@ static chirp_expr *postfix(chirp_parser *p) {
             chirp_ast_arg *arena_args = NULL;
             if (count > 0) {
                 arena_args = (chirp_ast_arg *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_ast_arg));
+                if (arena_args == NULL) {
+                    bs_free(arg_buf);
+                    parser_oom(p);
+                    return NULL;
+                }
                 memcpy(arena_args, arg_buf, count * sizeof(chirp_ast_arg));
             }
             bs_free(arg_buf);
 
             chirp_ast_arg_list args = { .items = arena_args, .count = count };
-            expr = chirp_ast_new_call(p->arena, expr, args, paren);
+            expr = check_expr_alloc(p, chirp_ast_new_call(p->arena, expr, args, paren));
+            if (p->had_error) return NULL;
         } else if (match(p, CHIRP_TOK_LBRACKET)) {
             chirp_token bracket = *previous(p);
-            size_t cap = 4;
-            chirp_ast_arg *arg_buf = (chirp_ast_arg *)bs_alloc(cap * sizeof(chirp_ast_arg));
+            size_t cap = 0;
+            chirp_ast_arg *arg_buf = NULL;
             size_t count = 0;
 
             if (!check(p, CHIRP_TOK_RBRACKET)) {
                 do {
-                    if (count >= cap) {
-                        cap *= 2;
-                        arg_buf = (chirp_ast_arg *)bs_realloc(arg_buf, cap * sizeof(chirp_ast_arg));
+                    if (!buf_grow(p, (void **)&arg_buf, &cap, count, sizeof(chirp_ast_arg))) {
+                        bs_free(arg_buf);
+                        return NULL;
                     }
                     chirp_expr *val = expression(p);
-                    if (p->had_error) { bs_free(arg_buf); return NULL; }
+                    if (p->had_error || val == NULL) { bs_free(arg_buf); return NULL; }
 
                     memset(&arg_buf[count].name, 0, sizeof(chirp_token));
                     arg_buf[count].has_name = false;
@@ -704,7 +778,6 @@ static chirp_expr *postfix(chirp_parser *p) {
                     count++;
                 } while (match(p, CHIRP_TOK_COMMA));
             } else {
-                bs_free(arg_buf);
                 parser_fail(p, bracket, "Expect at least one argument for indexing.");
                 return NULL;
             }
@@ -715,11 +788,17 @@ static chirp_expr *postfix(chirp_parser *p) {
             }
 
             chirp_ast_arg *arena_args = (chirp_ast_arg *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_ast_arg));
+            if (arena_args == NULL) {
+                bs_free(arg_buf);
+                parser_oom(p);
+                return NULL;
+            }
             memcpy(arena_args, arg_buf, count * sizeof(chirp_ast_arg));
             bs_free(arg_buf);
 
             chirp_ast_arg_list args = { .items = arena_args, .count = count };
-            expr = chirp_ast_new_index(p->arena, expr, args, bracket);
+            expr = check_expr_alloc(p, chirp_ast_new_index(p->arena, expr, args, bracket));
+            if (p->had_error) return NULL;
         } else {
             break;
         }
@@ -778,15 +857,15 @@ static chirp_expr *primary(chirp_parser *p) {
         consume(p, CHIRP_TOK_LBRACE, "Expect '{' after 'struct'.");
         if (p->had_error) return NULL;
 
-        size_t cap = 4;
-        chirp_named_binding *field_buf = (chirp_named_binding *)bs_alloc(cap * sizeof(chirp_named_binding));
+        size_t cap = 0;
+        chirp_named_binding *field_buf = NULL;
         size_t count = 0;
 
         if (!check(p, CHIRP_TOK_RBRACE)) {
             while (true) {
-                if (count >= cap) {
-                    cap *= 2;
-                    field_buf = (chirp_named_binding *)bs_realloc(field_buf, cap * sizeof(chirp_named_binding));
+                if (!buf_grow(p, (void **)&field_buf, &cap, count, sizeof(chirp_named_binding))) {
+                    bs_free(field_buf);
+                    return NULL;
                 }
                 field_buf[count++] = parse_binding(p, false, true, true, NULL);
                 if (p->had_error) { bs_free(field_buf); return NULL; }
@@ -800,12 +879,17 @@ static chirp_expr *primary(chirp_parser *p) {
         chirp_named_binding *arena_fields = NULL;
         if (count > 0) {
             arena_fields = (chirp_named_binding *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_named_binding));
+            if (arena_fields == NULL) {
+                bs_free(field_buf);
+                parser_oom(p);
+                return NULL;
+            }
             memcpy(arena_fields, field_buf, count * sizeof(chirp_named_binding));
         }
         bs_free(field_buf);
 
         chirp_binding_list fields = { .items = arena_fields, .count = count };
-        return chirp_ast_new_struct(p->arena, fields, struct_tok);
+        return check_expr_alloc(p, chirp_ast_new_struct(p->arena, fields, struct_tok));
     }
 
     if (match(p, CHIRP_TOK_KW_ENUM)) {
@@ -813,17 +897,17 @@ static chirp_expr *primary(chirp_parser *p) {
         consume(p, CHIRP_TOK_LBRACE, "Expect '{' after 'enum'.");
         if (p->had_error) return NULL;
 
-        size_t cap = 4;
-        chirp_str_view *var_buf = (chirp_str_view *)bs_alloc(cap * sizeof(chirp_str_view));
+        size_t cap = 0;
+        chirp_str_view *var_buf = NULL;
         size_t count = 0;
 
         if (!check(p, CHIRP_TOK_RBRACE)) {
             while (true) {
                 const chirp_token *var_tok = consume(p, CHIRP_TOK_IDENTIFIER, "Expect enum variant identifier.");
                 if (p->had_error) { bs_free(var_buf); return NULL; }
-                if (count >= cap) {
-                    cap *= 2;
-                    var_buf = (chirp_str_view *)bs_realloc(var_buf, cap * sizeof(chirp_str_view));
+                if (!buf_grow(p, (void **)&var_buf, &cap, count, sizeof(chirp_str_view))) {
+                    bs_free(var_buf);
+                    return NULL;
                 }
                 var_buf[count++] = var_tok->lexeme;
                 if (!match(p, CHIRP_TOK_COMMA)) break;
@@ -836,13 +920,18 @@ static chirp_expr *primary(chirp_parser *p) {
         chirp_str_view *arena_vars = NULL;
         if (count > 0) {
             arena_vars = (chirp_str_view *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_str_view));
+            if (arena_vars == NULL) {
+                bs_free(var_buf);
+                parser_oom(p);
+                return NULL;
+            }
             memcpy(arena_vars, var_buf, count * sizeof(chirp_str_view));
         }
         bs_free(var_buf);
 
         static uint64_t next_enum_id = 1;
         chirp_str_view_list variants = { .items = arena_vars, .count = count };
-        return chirp_ast_new_enum(p->arena, variants, next_enum_id++, enum_tok);
+        return check_expr_alloc(p, chirp_ast_new_enum(p->arena, variants, next_enum_id++, enum_tok));
     }
 
     if (match(p, CHIRP_TOK_KW_FOR)) {
@@ -854,7 +943,7 @@ static chirp_expr *primary(chirp_parser *p) {
         consume(p, CHIRP_TOK_RPAREN, "Expect ')' after for loop iterable.");
         chirp_expr *body = expression(p);
         if (p->had_error) return NULL;
-        return chirp_ast_new_for(p->arena, binding, iterable, body, for_tok);
+        return check_expr_alloc(p, chirp_ast_new_for(p->arena, binding, iterable, body, for_tok));
     }
 
     if (match(p, CHIRP_TOK_KW_WHILE)) {
@@ -864,7 +953,7 @@ static chirp_expr *primary(chirp_parser *p) {
         consume(p, CHIRP_TOK_RPAREN, "Expect ')' after while condition.");
         chirp_expr *body = expression(p);
         if (p->had_error) return NULL;
-        return chirp_ast_new_while(p->arena, cond, body, while_tok);
+        return check_expr_alloc(p, chirp_ast_new_while(p->arena, cond, body, while_tok));
     }
 
     if (match(p, CHIRP_TOK_KW_MATCH)) {
@@ -873,15 +962,15 @@ static chirp_expr *primary(chirp_parser *p) {
         consume(p, CHIRP_TOK_LBRACE, "Expect '{' after match subject.");
         if (p->had_error) return NULL;
 
-        size_t cap = 4;
-        chirp_match_arm *arm_buf = (chirp_match_arm *)bs_alloc(cap * sizeof(chirp_match_arm));
+        size_t cap = 0;
+        chirp_match_arm *arm_buf = NULL;
         size_t count = 0;
 
         if (!check(p, CHIRP_TOK_RBRACE)) {
             do {
-                if (count >= cap) {
-                    cap *= 2;
-                    arm_buf = (chirp_match_arm *)bs_realloc(arm_buf, cap * sizeof(chirp_match_arm));
+                if (!buf_grow(p, (void **)&arm_buf, &cap, count, sizeof(chirp_match_arm))) {
+                    bs_free(arm_buf);
+                    return NULL;
                 }
                 chirp_expr *pattern = expression(p);
                 consume(p, CHIRP_TOK_FAT_ARROW, "Expect '=>' after match pattern.");
@@ -899,12 +988,17 @@ static chirp_expr *primary(chirp_parser *p) {
         chirp_match_arm *arena_arms = NULL;
         if (count > 0) {
             arena_arms = (chirp_match_arm *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_match_arm));
+            if (arena_arms == NULL) {
+                bs_free(arm_buf);
+                parser_oom(p);
+                return NULL;
+            }
             memcpy(arena_arms, arm_buf, count * sizeof(chirp_match_arm));
         }
         bs_free(arm_buf);
 
         chirp_match_arm_list arms = { .items = arena_arms, .count = count };
-        return chirp_ast_new_match(p->arena, subject, arms, match_tok);
+        return check_expr_alloc(p, chirp_ast_new_match(p->arena, subject, arms, match_tok));
     }
 
     if (match(p, CHIRP_TOK_KW_IF)) {
@@ -916,7 +1010,7 @@ static chirp_expr *primary(chirp_parser *p) {
         consume(p, CHIRP_TOK_KW_ELSE, "Expect 'else' branch for if expression.");
         chirp_expr *else_branch = expression(p);
         if (p->had_error) return NULL;
-        return chirp_ast_new_if(p->arena, condition, then_branch, else_branch, if_tok);
+        return check_expr_alloc(p, chirp_ast_new_if(p->arena, condition, then_branch, else_branch, if_tok));
     }
 
     if (match(p, CHIRP_TOK_LBRACKET)) {
@@ -927,8 +1021,8 @@ static chirp_expr *primary(chirp_parser *p) {
         if (!check(p, CHIRP_TOK_RBRACKET)) {
             do {
                 chirp_expr *el = expression(p);
-                if (p->had_error) { ptr_vec_free(&elements); return NULL; }
-                ptr_vec_push(&elements, el);
+                if (p->had_error || el == NULL) { ptr_vec_free(&elements); return NULL; }
+                if (!ptr_vec_push(p, &elements, el)) { ptr_vec_free(&elements); return NULL; }
             } while (match(p, CHIRP_TOK_COMMA) && !check(p, CHIRP_TOK_RBRACKET));
         }
         consume(p, CHIRP_TOK_RBRACKET, "Expect ']' after list elements.");
@@ -937,28 +1031,38 @@ static chirp_expr *primary(chirp_parser *p) {
         chirp_expr **arena_els = NULL;
         if (elements.count > 0) {
             arena_els = (chirp_expr **)chirp_ast_arena_alloc_array(p->arena, elements.count, sizeof(chirp_expr *));
+            if (arena_els == NULL) {
+                ptr_vec_free(&elements);
+                parser_oom(p);
+                return NULL;
+            }
             memcpy(arena_els, elements.items, elements.count * sizeof(chirp_expr *));
         }
         size_t cnt = elements.count;
         ptr_vec_free(&elements);
 
         chirp_expr_list list = { .items = arena_els, .count = cnt };
-        return chirp_ast_new_list(p->arena, list, bracket_tok);
+        return check_expr_alloc(p, chirp_ast_new_list(p->arena, list, bracket_tok));
     }
 
-    if (match(p, CHIRP_TOK_NUMBER)) return chirp_ast_new_number(p->arena, previous(p)->lexeme, *previous(p));
-    if (match(p, CHIRP_TOK_STRING)) return chirp_ast_new_string(p->arena, previous(p)->lexeme, *previous(p));
-    if (match(p, CHIRP_TOK_CHARACTER)) return chirp_ast_new_char(p->arena, previous(p)->lexeme, *previous(p));
-    if (match(p, CHIRP_TOK_SYMBOLIC_CONSTANT)) return chirp_ast_new_symbolic_constant(p->arena, previous(p)->lexeme, *previous(p));
-    if (match(p, CHIRP_TOK_IDENTIFIER)) return chirp_ast_new_identifier(p->arena, previous(p)->lexeme, *previous(p));
-    if (match(p, CHIRP_TOK_INTRINSIC)) return chirp_ast_new_intrinsic(p->arena, previous(p)->lexeme, *previous(p));
+    if (match(p, CHIRP_TOK_NUMBER)) return check_expr_alloc(p, chirp_ast_new_number(p->arena, previous(p)->lexeme, *previous(p)));
+    if (match(p, CHIRP_TOK_STRING)) return check_expr_alloc(p, chirp_ast_new_string(p->arena, previous(p)->lexeme, *previous(p)));
+    if (match(p, CHIRP_TOK_CHARACTER)) return check_expr_alloc(p, chirp_ast_new_char(p->arena, previous(p)->lexeme, *previous(p)));
+    if (match(p, CHIRP_TOK_SYMBOLIC_CONSTANT)) return check_expr_alloc(p, chirp_ast_new_symbolic_constant(p->arena, previous(p)->lexeme, *previous(p)));
+    if (match(p, CHIRP_TOK_IDENTIFIER)) return check_expr_alloc(p, chirp_ast_new_identifier(p->arena, previous(p)->lexeme, *previous(p)));
+    if (match(p, CHIRP_TOK_INTRINSIC)) return check_expr_alloc(p, chirp_ast_new_intrinsic(p->arena, previous(p)->lexeme, *previous(p)));
 
     if (match(p, CHIRP_TOK_FSTRING_LITERAL)) {
         chirp_token lit_tok = *previous(p);
         chirp_expr **part = (chirp_expr **)chirp_ast_arena_alloc_array(p->arena, 1, sizeof(chirp_expr *));
-        part[0] = chirp_ast_new_string(p->arena, lit_tok.lexeme, lit_tok);
+        if (part == NULL) {
+            parser_oom(p);
+            return NULL;
+        }
+        part[0] = check_expr_alloc(p, chirp_ast_new_string(p->arena, lit_tok.lexeme, lit_tok));
+        if (part[0] == NULL) return NULL;
         chirp_expr_list parts = { .items = part, .count = 1 };
-        return chirp_ast_new_fstring(p->arena, parts, lit_tok);
+        return check_expr_alloc(p, chirp_ast_new_fstring(p->arena, parts, lit_tok));
     }
 
     if (match(p, CHIRP_TOK_FSTRING_HEAD)) {
@@ -966,19 +1070,31 @@ static chirp_expr *primary(chirp_parser *p) {
         ptr_vec parts;
         ptr_vec_init(&parts);
 
-        ptr_vec_push(&parts, chirp_ast_new_string(p->arena, head_tok.lexeme, head_tok));
+        chirp_expr *head_str = check_expr_alloc(p, chirp_ast_new_string(p->arena, head_tok.lexeme, head_tok));
+        if (head_str == NULL || !ptr_vec_push(p, &parts, head_str)) {
+            ptr_vec_free(&parts);
+            return NULL;
+        }
 
         while (true) {
             chirp_expr *expr = expression(p);
-            if (p->had_error) { ptr_vec_free(&parts); return NULL; }
-            ptr_vec_push(&parts, expr);
+            if (p->had_error || expr == NULL) { ptr_vec_free(&parts); return NULL; }
+            if (!ptr_vec_push(p, &parts, expr)) { ptr_vec_free(&parts); return NULL; }
 
             if (match(p, CHIRP_TOK_FSTRING_MIDDLE)) {
                 chirp_token mid_tok = *previous(p);
-                ptr_vec_push(&parts, chirp_ast_new_string(p->arena, mid_tok.lexeme, mid_tok));
+                chirp_expr *mid_str = check_expr_alloc(p, chirp_ast_new_string(p->arena, mid_tok.lexeme, mid_tok));
+                if (mid_str == NULL || !ptr_vec_push(p, &parts, mid_str)) {
+                    ptr_vec_free(&parts);
+                    return NULL;
+                }
             } else if (match(p, CHIRP_TOK_FSTRING_TAIL)) {
                 chirp_token tail_tok = *previous(p);
-                ptr_vec_push(&parts, chirp_ast_new_string(p->arena, tail_tok.lexeme, tail_tok));
+                chirp_expr *tail_str = check_expr_alloc(p, chirp_ast_new_string(p->arena, tail_tok.lexeme, tail_tok));
+                if (tail_str == NULL || !ptr_vec_push(p, &parts, tail_str)) {
+                    ptr_vec_free(&parts);
+                    return NULL;
+                }
                 break;
             } else {
                 ptr_vec_free(&parts);
@@ -987,27 +1103,35 @@ static chirp_expr *primary(chirp_parser *p) {
             }
         }
 
-        chirp_expr **arena_parts = (chirp_expr **)chirp_ast_arena_alloc_array(p->arena, parts.count, sizeof(chirp_expr *));
-        memcpy(arena_parts, parts.items, parts.count * sizeof(chirp_expr *));
+        chirp_expr **arena_parts = NULL;
+        if (parts.count > 0) {
+            arena_parts = (chirp_expr **)chirp_ast_arena_alloc_array(p->arena, parts.count, sizeof(chirp_expr *));
+            if (arena_parts == NULL) {
+                ptr_vec_free(&parts);
+                parser_oom(p);
+                return NULL;
+            }
+            memcpy(arena_parts, parts.items, parts.count * sizeof(chirp_expr *));
+        }
         size_t count = parts.count;
         ptr_vec_free(&parts);
 
         chirp_expr_list plist = { .items = arena_parts, .count = count };
-        return chirp_ast_new_fstring(p->arena, plist, head_tok);
+        return check_expr_alloc(p, chirp_ast_new_fstring(p->arena, plist, head_tok));
     }
 
     if (check(p, CHIRP_TOK_LPAREN)) {
         if (is_lambda_or_signature_ahead(p)) {
             chirp_token paren_tok = *advance(p);
-            size_t cap = 4;
-            chirp_named_binding *param_buf = (chirp_named_binding *)bs_alloc(cap * sizeof(chirp_named_binding));
+            size_t cap = 0;
+            chirp_named_binding *param_buf = NULL;
             size_t count = 0;
 
             if (!check(p, CHIRP_TOK_RPAREN)) {
                 do {
-                    if (count >= cap) {
-                        cap *= 2;
-                        param_buf = (chirp_named_binding *)bs_realloc(param_buf, cap * sizeof(chirp_named_binding));
+                    if (!buf_grow(p, (void **)&param_buf, &cap, count, sizeof(chirp_named_binding))) {
+                        bs_free(param_buf);
+                        return NULL;
                     }
                     param_buf[count++] = parse_binding(p, false, false, false, NULL);
                     if (p->had_error) { bs_free(param_buf); return NULL; }
@@ -1019,6 +1143,11 @@ static chirp_expr *primary(chirp_parser *p) {
             chirp_named_binding *arena_params = NULL;
             if (count > 0) {
                 arena_params = (chirp_named_binding *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_named_binding));
+                if (arena_params == NULL) {
+                    bs_free(param_buf);
+                    parser_oom(p);
+                    return NULL;
+                }
                 memcpy(arena_params, param_buf, count * sizeof(chirp_named_binding));
             }
             bs_free(param_buf);
@@ -1033,19 +1162,19 @@ static chirp_expr *primary(chirp_parser *p) {
             if (match(p, CHIRP_TOK_FAT_ARROW)) {
                 chirp_expr *body = expression(p);
                 if (p->had_error) return NULL;
-                return chirp_ast_new_lambda(p->arena, params, return_bound, body, paren_tok);
+                return check_expr_alloc(p, chirp_ast_new_lambda(p->arena, params, return_bound, body, paren_tok));
             } else {
                 consume(p, CHIRP_TOK_ARROW, "Expect '=>' or '->' after parameters.");
                 chirp_expr *return_constraint = expression(p);
                 if (p->had_error) return NULL;
-                return chirp_ast_new_signature(p->arena, params, return_constraint, paren_tok);
+                return check_expr_alloc(p, chirp_ast_new_signature(p->arena, params, return_constraint, paren_tok));
             }
         } else {
             advance(p); // consume '('
             chirp_expr *expr = expression(p);
             consume(p, CHIRP_TOK_RPAREN, "Expect ')' after grouping expression.");
             if (p->had_error) return NULL;
-            return chirp_ast_new_grouping(p->arena, expr, *previous(p));
+            return check_expr_alloc(p, chirp_ast_new_grouping(p->arena, expr, *previous(p)));
         }
     }
 
@@ -1060,12 +1189,12 @@ static chirp_expr *primary(chirp_parser *p) {
         while (!check(p, CHIRP_TOK_RBRACE) && !is_at_end(p)) {
             if (match(p, CHIRP_TOK_KW_LET)) {
                 chirp_stmt *s = let_declaration(p);
-                if (p->had_error) { ptr_vec_free(&stmts); return NULL; }
-                ptr_vec_push(&stmts, s);
+                if (p->had_error || s == NULL) { ptr_vec_free(&stmts); return NULL; }
+                if (!ptr_vec_push(p, &stmts, s)) { ptr_vec_free(&stmts); return NULL; }
             } else if (match(p, CHIRP_TOK_KW_BREAK)) {
                 chirp_stmt *s = break_statement(p);
-                if (p->had_error) { ptr_vec_free(&stmts); return NULL; }
-                ptr_vec_push(&stmts, s);
+                if (p->had_error || s == NULL) { ptr_vec_free(&stmts); return NULL; }
+                if (!ptr_vec_push(p, &stmts, s)) { ptr_vec_free(&stmts); return NULL; }
             } else {
                 parser_checkpoint cp = parser_save(p);
                 chirp_token expr_start_tok = *peek(p);
@@ -1074,24 +1203,33 @@ static chirp_expr *primary(chirp_parser *p) {
                 if (!p->had_error && expr != NULL) {
                     if (check(p, CHIRP_TOK_RBRACE)) {
                         // Trailing expression lowered to break expr;
-                        chirp_stmt *s = chirp_ast_new_break_stmt(p->arena, expr, expr_start_tok);
-                        ptr_vec_push(&stmts, s);
+                        chirp_stmt *s = check_stmt_alloc(p, chirp_ast_new_break_stmt(p->arena, expr, expr_start_tok));
+                        if (s == NULL || !ptr_vec_push(p, &stmts, s)) {
+                            ptr_vec_free(&stmts);
+                            return NULL;
+                        }
                         continue;
                     }
                     if (is_assignment_operator(peek(p)->type)) {
                         chirp_token op = *advance(p);
                         chirp_expr *val = expression(p);
-                        if (!p->had_error) {
+                        if (!p->had_error && val != NULL) {
                             consume(p, CHIRP_TOK_SEMICOLON, "Expect ';' after assignment.");
                             if (!p->had_error) {
-                                chirp_stmt *s = chirp_ast_new_assign_stmt(p->arena, expr, op, val, expr_start_tok);
-                                ptr_vec_push(&stmts, s);
+                                chirp_stmt *s = check_stmt_alloc(p, chirp_ast_new_assign_stmt(p->arena, expr, op, val, expr_start_tok));
+                                if (s == NULL || !ptr_vec_push(p, &stmts, s)) {
+                                    ptr_vec_free(&stmts);
+                                    return NULL;
+                                }
                                 continue;
                             }
                         }
                     } else if (match(p, CHIRP_TOK_SEMICOLON)) {
-                        chirp_stmt *s = chirp_ast_new_expr_stmt(p->arena, expr, expr_start_tok);
-                        ptr_vec_push(&stmts, s);
+                        chirp_stmt *s = check_stmt_alloc(p, chirp_ast_new_expr_stmt(p->arena, expr, expr_start_tok));
+                        if (s == NULL || !ptr_vec_push(p, &stmts, s)) {
+                            ptr_vec_free(&stmts);
+                            return NULL;
+                        }
                         continue;
                     }
                 }
@@ -1099,8 +1237,8 @@ static chirp_expr *primary(chirp_parser *p) {
                 // If speculative parse failed, rewind and parse statement
                 parser_restore(p, cp);
                 chirp_stmt *s = statement(p);
-                if (p->had_error) { ptr_vec_free(&stmts); return NULL; }
-                ptr_vec_push(&stmts, s);
+                if (p->had_error || s == NULL) { ptr_vec_free(&stmts); return NULL; }
+                if (!ptr_vec_push(p, &stmts, s)) { ptr_vec_free(&stmts); return NULL; }
             }
         }
         consume(p, CHIRP_TOK_RBRACE, "Expect '}' after block.");
@@ -1109,13 +1247,18 @@ static chirp_expr *primary(chirp_parser *p) {
         chirp_stmt **arena_stmts = NULL;
         if (stmts.count > 0) {
             arena_stmts = (chirp_stmt **)chirp_ast_arena_alloc_array(p->arena, stmts.count, sizeof(chirp_stmt *));
+            if (arena_stmts == NULL) {
+                ptr_vec_free(&stmts);
+                parser_oom(p);
+                return NULL;
+            }
             memcpy(arena_stmts, stmts.items, stmts.count * sizeof(chirp_stmt *));
         }
         size_t count = stmts.count;
         ptr_vec_free(&stmts);
 
         chirp_stmt_list list = { .items = arena_stmts, .count = count };
-        return chirp_ast_new_block(p->arena, list, do_tok);
+        return check_expr_alloc(p, chirp_ast_new_block(p->arena, list, do_tok));
     }
 
     if (match(p, CHIRP_TOK_LBRACE)) {
@@ -1124,7 +1267,7 @@ static chirp_expr *primary(chirp_parser *p) {
         // 1. Empty set: {}
         if (match(p, CHIRP_TOK_RBRACE)) {
             chirp_expr_list empty_list = { .items = NULL, .count = 0 };
-            return chirp_ast_new_enumerated_set(p->arena, empty_list, brace_tok);
+            return check_expr_alloc(p, chirp_ast_new_enumerated_set(p->arena, empty_list, brace_tok));
         }
 
         // 2. Constructed set: { x : bound | cond } or { x | cond }
@@ -1135,24 +1278,24 @@ static chirp_expr *primary(chirp_parser *p) {
             chirp_expr *cond = expression(p);
             consume(p, CHIRP_TOK_RBRACE, "Expect '}' after constructed set condition.");
             if (p->had_error) return NULL;
-            return chirp_ast_new_constructed_set(p->arena, binding, cond, brace_tok);
+            return check_expr_alloc(p, chirp_ast_new_constructed_set(p->arena, binding, cond, brace_tok));
         }
 
         // 3. Anonymous struct literal: { x = 1, y = 2 }
         if (check(p, CHIRP_TOK_IDENTIFIER) && peek_next(p)->type == CHIRP_TOK_EQUAL) {
-            size_t cap = 4;
-            chirp_ast_arg *field_buf = (chirp_ast_arg *)bs_alloc(cap * sizeof(chirp_ast_arg));
+            size_t cap = 0;
+            chirp_ast_arg *field_buf = NULL;
             size_t count = 0;
 
             do {
-                if (count >= cap) {
-                    cap *= 2;
-                    field_buf = (chirp_ast_arg *)bs_realloc(field_buf, cap * sizeof(chirp_ast_arg));
+                if (!buf_grow(p, (void **)&field_buf, &cap, count, sizeof(chirp_ast_arg))) {
+                    bs_free(field_buf);
+                    return NULL;
                 }
                 const chirp_token *name = consume(p, CHIRP_TOK_IDENTIFIER, "Expect field name in anonymous struct literal.");
                 consume(p, CHIRP_TOK_EQUAL, "Expect '=' after anonymous struct field name.");
                 chirp_expr *val = expression(p);
-                if (p->had_error) { bs_free(field_buf); return NULL; }
+                if (p->had_error || val == NULL) { bs_free(field_buf); return NULL; }
 
                 field_buf[count].name = *name;
                 field_buf[count].has_name = true;
@@ -1163,12 +1306,20 @@ static chirp_expr *primary(chirp_parser *p) {
             consume(p, CHIRP_TOK_RBRACE, "Expect '}' after anonymous struct literal.");
             if (p->had_error) { bs_free(field_buf); return NULL; }
 
-            chirp_ast_arg *arena_fields = (chirp_ast_arg *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_ast_arg));
-            memcpy(arena_fields, field_buf, count * sizeof(chirp_ast_arg));
+            chirp_ast_arg *arena_fields = NULL;
+            if (count > 0) {
+                arena_fields = (chirp_ast_arg *)chirp_ast_arena_alloc_array(p->arena, count, sizeof(chirp_ast_arg));
+                if (arena_fields == NULL) {
+                    bs_free(field_buf);
+                    parser_oom(p);
+                    return NULL;
+                }
+                memcpy(arena_fields, field_buf, count * sizeof(chirp_ast_arg));
+            }
             bs_free(field_buf);
 
             chirp_ast_arg_list fields = { .items = arena_fields, .count = count };
-            return chirp_ast_new_anon_struct(p->arena, fields, brace_tok);
+            return check_expr_alloc(p, chirp_ast_new_anon_struct(p->arena, fields, brace_tok));
         }
 
         // 4. Enumerated set: { expr, ... }
@@ -1176,25 +1327,33 @@ static chirp_expr *primary(chirp_parser *p) {
         ptr_vec_init(&elements);
 
         chirp_expr *first = expression(p);
-        if (p->had_error) { ptr_vec_free(&elements); return NULL; }
-        ptr_vec_push(&elements, first);
+        if (p->had_error || first == NULL) { ptr_vec_free(&elements); return NULL; }
+        if (!ptr_vec_push(p, &elements, first)) { ptr_vec_free(&elements); return NULL; }
 
         while (match(p, CHIRP_TOK_COMMA)) {
             if (check(p, CHIRP_TOK_RBRACE)) break;
             chirp_expr *next = expression(p);
-            if (p->had_error) { ptr_vec_free(&elements); return NULL; }
-            ptr_vec_push(&elements, next);
+            if (p->had_error || next == NULL) { ptr_vec_free(&elements); return NULL; }
+            if (!ptr_vec_push(p, &elements, next)) { ptr_vec_free(&elements); return NULL; }
         }
         consume(p, CHIRP_TOK_RBRACE, "Expect '}' after enumerated set elements.");
         if (p->had_error) { ptr_vec_free(&elements); return NULL; }
 
-        chirp_expr **arena_els = (chirp_expr **)chirp_ast_arena_alloc_array(p->arena, elements.count, sizeof(chirp_expr *));
-        memcpy(arena_els, elements.items, elements.count * sizeof(chirp_expr *));
+        chirp_expr **arena_els = NULL;
+        if (elements.count > 0) {
+            arena_els = (chirp_expr **)chirp_ast_arena_alloc_array(p->arena, elements.count, sizeof(chirp_expr *));
+            if (arena_els == NULL) {
+                ptr_vec_free(&elements);
+                parser_oom(p);
+                return NULL;
+            }
+            memcpy(arena_els, elements.items, elements.count * sizeof(chirp_expr *));
+        }
         size_t count = elements.count;
         ptr_vec_free(&elements);
 
         chirp_expr_list elist = { .items = arena_els, .count = count };
-        return chirp_ast_new_enumerated_set(p->arena, elist, brace_tok);
+        return check_expr_alloc(p, chirp_ast_new_enumerated_set(p->arena, elist, brace_tok));
     }
 
     parser_fail(p, *peek(p), "Expect expression.");
@@ -1230,7 +1389,8 @@ bs_status chirp_parse_expression(
     parser.error_status = BS_OK;
 
     chirp_expr *expr = expression(&parser);
-    if (parser.had_error) {
+    if (parser.had_error || expr == NULL) {
+        if (!parser.had_error) parser_oom(&parser);
         *out_expr = NULL;
         return parser.error_status;
     }
@@ -1276,16 +1436,24 @@ bs_status chirp_parse_program(
 
     while (!is_at_end(&parser)) {
         chirp_stmt *s = statement(&parser);
-        if (parser.had_error) {
+        if (parser.had_error || s == NULL) {
+            ptr_vec_free(&stmts);
+            return parser.error_status != BS_OK ? parser.error_status : BS_FRONTEND_SYNTAX_ERROR;
+        }
+        if (!ptr_vec_push(&parser, &stmts, s)) {
             ptr_vec_free(&stmts);
             return parser.error_status;
         }
-        ptr_vec_push(&stmts, s);
     }
 
     chirp_stmt **arena_stmts = NULL;
     if (stmts.count > 0) {
         arena_stmts = (chirp_stmt **)chirp_ast_arena_alloc_array(arena, stmts.count, sizeof(chirp_stmt *));
+        if (arena_stmts == NULL) {
+            ptr_vec_free(&stmts);
+            parser_oom(&parser);
+            return parser.error_status;
+        }
         memcpy(arena_stmts, stmts.items, stmts.count * sizeof(chirp_stmt *));
     }
     out_program->statements.items = arena_stmts;
