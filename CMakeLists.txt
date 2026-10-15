@@ -50,6 +50,7 @@ add_subdirectory(libs/core)
 add_subdirectory(libs/num)
 add_subdirectory(libs/sets)
 add_subdirectory(libs/chirp_vm)
+add_subdirectory(libs/chirp_frontend)
 
 # Suite-wide integration tests
 if(BIRDSAFE_BUILD_TESTS)

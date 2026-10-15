@@ -25,7 +25,8 @@ typedef enum bs_domain {
     BS_DOMAIN_CORE = 0,
     BS_DOMAIN_NUM  = 1,
     BS_DOMAIN_SETS = 2,
-    BS_DOMAIN_VM   = 3,
+    BS_DOMAIN_VM       = 3,
+    BS_DOMAIN_FRONTEND = 4,
 } bs_domain;
 
 /** Core domain status and error codes. */
@@ -50,6 +51,12 @@ typedef enum bs_vm_status {
     BS_VM_TYPE_ERROR            = BS_STATUS_MAKE(BS_DOMAIN_VM, 11),
     BS_VM_INVALID_BLOCK         = BS_STATUS_MAKE(BS_DOMAIN_VM, 12),
 } bs_vm_status;
+
+/** Frontend domain status and error codes. */
+typedef enum bs_frontend_status {
+    BS_FRONTEND_LEX_ERROR    = BS_STATUS_MAKE(BS_DOMAIN_FRONTEND, 1),
+    BS_FRONTEND_SYNTAX_ERROR = BS_STATUS_MAKE(BS_DOMAIN_FRONTEND, 2),
+} bs_frontend_status;
 
 /** Returns the canonical name of the status code's domain. */
 BS_API const char *bs_status_domain_name(bs_status status);

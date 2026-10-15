@@ -6,6 +6,7 @@ const char *bs_status_domain_name(bs_status status) {
         case BS_DOMAIN_NUM:  return "num";
         case BS_DOMAIN_SETS: return "sets";
         case BS_DOMAIN_VM:   return "vm";
+        case BS_DOMAIN_FRONTEND: return "frontend";
         default:             return "unknown";
     }
 }
@@ -52,6 +53,12 @@ const char *bs_status_string(bs_status status) {
                 case 11: return "Type error";
                 case 12: return "Invalid block";
                 default: return "Unknown vm status";
+            }
+        case BS_DOMAIN_FRONTEND:
+            switch (code) {
+                case 1: return "Lexical error";
+                case 2: return "Syntax error";
+                default: return "Unknown frontend status";
             }
         default:
             return "Unknown status";
